@@ -2,3 +2,14 @@ tensorflow
 sklearn
 pandas
 pyyaml
+tf2onnx
+seaborn
+matplotlib
+tensorflow-addons
+dvclive
+optuna
+plotly
+nvgpu
+onnx
+onnxruntime
+imbalanced-learn

@@ -3,13 +3,23 @@
 
 import yaml
 import pandas as pd
-from sklearn.feature_selection import SelectKBest, chi2, f_classif
-# TODO Uncomment this since it's slowing things down
-# from featurewiz import featurewiz
-# import seaborn as sns
-# import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn import metrics
+from sklearn.feature_selection import SelectKBest, chi2, f_classif, RFECV
+from sklearn.feature_selection import RFECV
+import numpy as np
+from sklearn.svm import SVR
+from featurewiz import featurewiz
+import seaborn as sns
+import matplotlib.pyplot as plt
 import os
-# For training RF model
+from sklearn.datasets import *
+from sklearn import tree
+from dtreeviz.trees import *
+from sklearn import preprocessing
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, VotingClassifier
+from sklearn.tree import DecisionTreeClassifier
+
 
 def read_config(fname="params.yaml"):
     """Function to read and return config params from yaml file
@@ -22,21 +32,10 @@ def read_config(fname="params.yaml"):
     """
     with open(fname, "r") as fs:
         try:
-            return yaml.safe_load(fs)['Feature_Selection']
+            return yaml.safe_load(fs)
         except yaml.YAMLError as exc:
             print(exc)
             return
-
-def train_model(config):
-    """This function trains a simple model for testing cml workflow
-    to plot confusion matrix.
-
-    Args:
-        config (dict) : Config for feature selection
-    Returns:
-        df (pd.DataFrame) : DataFrame containing (actual_output, predicted_output)
-    """
-    pass
 
 
 def select_k_best_features_sklearn(df, config):
@@ -58,7 +57,56 @@ def select_k_best_features_sklearn(df, config):
     f_cols_idx = k_best.get_support(indices=True)
     all_cols = list(features_df.columns)
     f_cols_sel = [all_cols[i] for i in f_cols_idx]
+    f_df = pd.DataFrame(f_cols_sel)
+    f_df.to_csv('sklearn.csv', header=False, index=False)
+
     return f_cols_sel
+
+
+def compute_feature_importance(voting_clf, weights):
+    """ Function to compute feature importance given a voting classifier """
+
+    feature_importance = dict()
+    for est in voting_clf.estimators_:
+        feature_importance[str(est)] = est.feature_importances_
+
+    fe_scores = [0]*len(list(feature_importance.values())[0])
+    for idx, imp_score in enumerate(feature_importance.values()):
+        imp_score_with_weight = imp_score*weights[idx]
+        fe_scores = list(np.add(fe_scores, list(imp_score_with_weight)))
+    return fe_scores
+
+
+def select_k_best_features_voting(df, config):
+    """This function selects k best features using feature selection using cuml
+
+    Args:
+        df (pd.DataFrame): Dataframe from csv values
+        k (int): Number of features to select
+    Returns:
+        list: List of best features
+    """
+
+    features_df = df.drop(["Label"], axis=1)
+    labels_df = df["Label"]
+    X_train, X_test, y_train, y_test = train_test_split(
+        features_df, labels_df, test_size=0.05)
+
+    rf_clf = RandomForestClassifier(n_estimators = 100)
+    dc_clf = DecisionTreeClassifier()
+    ab_clf = AdaBoostClassifier(n_estimators=100)
+    estimators = [('RF', rf_clf), ('DC', dc_clf), ('AB', ab_clf)]
+    voting_clf = VotingClassifier(estimators=estimators, voting='soft')
+
+    voting_clf.fit(X_train, y_train)
+    print("Done training voting classifier")
+
+    df = pd.DataFrame()
+    df['Feature'] = features_df.columns
+    df['Feature Importance'] = compute_feature_importance(voting_clf, [1, 1, 1])
+    df = df.sort_values('Feature Importance', ascending=False)
+    df.drop('Feature Importance', inplace=True, axis=1)
+    return df.head(config['n_features'])
 
 
 def select_k_best_features_featurwiz(df, config):
@@ -81,13 +129,19 @@ def select_k_best_features_featurwiz(df, config):
         feature_engg="",
         category_encoders="",
     )
-    # TODO Do we save all the ranks from featurewiz as well?
-    if len(out1) > config['n_features']:
-        out1 = out1[:config['n_features']]
-    out = [(f,i+1) for i,f in enumerate(out1)]
-    out_df = pd.DataFrame(out, columns=['Col_Name', 'Featurewiz_Rank'])
-    return out_df
+    return out1
 
+
+def save_dtree_viz(viz_df):
+    """ Function to save a decision tree visualization"""
+    features_df = viz_df.drop(["Label"], axis=1)
+    labels_df = viz_df["Label"]
+    clf = tree.DecisionTreeClassifier(max_depth=5)
+    clf.fit(features_df, labels_df)
+    viz = dtreeviz(clf, features_df, labels_df, target_name='classifier',
+                   feature_names=list(features_df.columns),
+                   class_names=list(labels_df.unique()))
+    viz.save('decision_tree.svg')
 
 if __name__ == "__main__":
     # Read input data and drop unuseful column
@@ -97,12 +151,34 @@ if __name__ == "__main__":
     if "Bar" in list(df.columns):
         df = df.drop("Bar", axis=1)
 
-    # Run feature selection
-    selected_cols = select_k_best_features_sklearn(df, config)
-    # We need label as well for reduced feature used to train data later
-    selected_cols.append('Label')
-    reduced_features = df[selected_cols]
+    # Run feature selection featurewiz
+    mode = config['mode']
+    if mode == "voting":
+        sel_df = select_k_best_features_voting(df, config)
+    elif mode == "featurewiz":
+        # Run feature selection featurewiz
+        selected_cols = select_k_best_features_featurwiz(df, config)
+        sel_df = pd.DataFrame(selected_cols, columns=['Features'])
+    else:
+        # Run feature selection using sklearn
+        selected_cols = select_k_best_features_sklearn(df, config)
+        sel_df = pd.DataFrame(selected_cols, columns=['Features'])
+
     # Ensure output directory exists
     os.makedirs('../2_Training_Workflow', exist_ok=True)
+    sel_df.to_csv("../2_Training_Workflow/Selected_Features.csv", index=False, header=False)
+    print("\nSaved features to Selected Features File\n")
+
+    # # For visualization with dtreeviz
+    # dtree_config = config.copy()
+    # dtree_config['n_features'] = config['vis_features']
+    # viz_cols = select_k_best_features_sklearn(df, dtree_config)
+    # viz_cols.append('Label')
+    # viz_df = df[viz_cols]
+    # save_dtree_viz(viz_df)
+
+    # #   We need label as well for reduced feature used to train data later
+    selected_cols.append('Label')
+    reduced_features = df[selected_cols]
     reduced_features.to_csv("../2_Training_Workflow/Reduced_Features.csv", index=False)
-    print("Saved features to Selected Features File")
+    print("\nSaved Reduced DataFrame from Selected Features\n")
